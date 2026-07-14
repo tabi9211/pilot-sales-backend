@@ -1,37 +1,49 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
-const { evaluateTransition, getApprovalThreshold, STAGES } = require('../businessRules');
+const { requireAuth, requireClusterAccess } = require('../middleware/auth');
+const { canCreateLead, canAdvance, getNextStageOptions, stageLabel } = require('../businessRules');
 
 const router = express.Router();
 
-async function logAudit(client, { leadId, userId, action, detail }) {
+async function logAudit(client, { userId, action, entity, entityId, details }) {
   await client.query(
-    'INSERT INTO audit_log (lead_id, user_id, action, detail) VALUES ($1, $2, $3, $4)',
-    [leadId, userId, action, detail]
+    'INSERT INTO audit_log (user_id, action, entity, entity_id, details) VALUES ($1,$2,$3,$4,$5)',
+    [userId, action, entity, entityId, details]
   );
 }
+async function addNotification(client, { userId, message, type }) {
+  await client.query(
+    'INSERT INTO notifications (user_id, message, type) VALUES ($1,$2,$3)',
+    [userId || null, message, type || 'info']
+  );
+}
+function nextLeadId(maxIdRow) {
+  const max = maxIdRow ? parseInt(String(maxIdRow.id).replace(/\D/g, ''), 10) || 0 : 0;
+  return 'L-' + (max + 1 <= 1000 ? 1001 : max + 1);
+}
 
-// Everything below requires a valid JWT. No route returns data without it.
-router.use(requireAuth);
+router.use(requireAuth, requireClusterAccess('sales'));
 
-// GET /api/leads — both roles can view all leads
+// GET /api/leads — Sales-cluster roles only (enforced above), returns all leads
 router.get('/', async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT l.*, u.username AS owner_username, a.username AS approved_by_username
+    `SELECT l.*, c.name AS customer_name, u.name AS owner_name
      FROM leads l
+     JOIN customers c ON c.id = l.customer_id
      JOIN users u ON u.id = l.owner_id
-     LEFT JOIN users a ON a.id = l.approved_by
      ORDER BY l.created_at DESC`
   );
-  res.json({ leads: rows, meta: { approvalThreshold: getApprovalThreshold(), stages: STAGES } });
+  res.json({ leads: rows });
 });
 
-// POST /api/leads — both roles can create leads
+// POST /api/leads — role-gated to CREATE_LEAD_ROLES, matches canCreateLead() exactly
 router.post('/', async (req, res) => {
-  const { customerName, contactName, estValue } = req.body || {};
-  if (!customerName || typeof estValue === 'undefined') {
-    return res.status(400).json({ error: 'customerName and estValue are required.' });
+  if (!canCreateLead(req.user.role)) {
+    return res.status(403).json({ error: 'Your role is not permitted to create leads.' });
+  }
+  const { customerId, contactName, source, estValue } = req.body || {};
+  if (!customerId || typeof estValue === 'undefined') {
+    return res.status(400).json({ error: 'customerId and estValue are required.' });
   }
   const value = Number(estValue);
   if (Number.isNaN(value) || value < 0) {
@@ -40,35 +52,43 @@ router.post('/', async (req, res) => {
 
   const client = await pool.connect();
   try {
+    const custCheck = await client.query('SELECT name FROM customers WHERE id = $1', [customerId]);
+    if (!custCheck.rows[0]) {
+      client.release();
+      return res.status(400).json({ error: 'Unknown customerId.' });
+    }
+
+    const { rows: maxRows } = await client.query(
+      `SELECT id FROM leads ORDER BY (regexp_replace(id, '\\D', '', 'g'))::int DESC LIMIT 1`
+    );
+    const newId = nextLeadId(maxRows[0]);
+
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `INSERT INTO leads (customer_name, contact_name, est_value, stage, owner_id)
-       VALUES ($1, $2, $3, 'New', $4) RETURNING *`,
-      [customerName, contactName || null, value, req.user.id]
+      `INSERT INTO leads (id, customer_id, contact_name, source, est_value, stage, owner_id)
+       VALUES ($1,$2,$3,$4,$5,'lead_created',$6) RETURNING *`,
+      [newId, customerId, contactName || null, source || null, value, req.user.id]
     );
     const lead = rows[0];
     await logAudit(client, {
-      leadId: lead.id,
-      userId: req.user.id,
-      action: 'create',
-      detail: `Lead created for ${customerName}`,
+      userId: req.user.id, action: 'Create', entity: 'Lead/Opportunity', entityId: lead.id,
+      details: `New lead created for ${custCheck.rows[0].name}${source ? ' via ' + source : ''}`,
     });
+    await addNotification(client, { message: `New lead ${lead.id} created for ${custCheck.rows[0].name}.`, type: 'info' });
     await client.query('COMMIT');
     res.status(201).json({ lead });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     res.status(500).json({ error: 'Failed to create lead.' });
   } finally {
     client.release();
   }
 });
 
-// POST /api/leads/:id/advance — the core enforcement point.
-// role, current stage, target stage, and deal value are all re-checked
-// against the DB record on the server; nothing is trusted from the client
-// except "which lead" and "which stage they're requesting".
+// POST /api/leads/:id/advance — matches StageEngine.advance() exactly,
+// re-validated server-side against the CURRENT stage in the database.
 router.post('/:id/advance', async (req, res) => {
-  const leadId = Number(req.params.id);
+  const leadId = req.params.id;
   const { targetStage } = req.body || {};
   if (!targetStage) {
     return res.status(400).json({ error: 'targetStage is required.' });
@@ -82,31 +102,22 @@ router.post('/:id/advance', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found.' });
     }
 
-    const decision = evaluateTransition({
-      role: req.user.role,
-      currentStage: lead.stage,
-      targetStage,
-      estValue: lead.est_value,
-    });
-
-    if (!decision.ok) {
-      return res.status(decision.status).json({
-        error: decision.reason,
-        requiresApproval: !!decision.requiresApproval,
+    if (!canAdvance(lead.stage, targetStage)) {
+      return res.status(409).json({
+        error: `Cannot move ${lead.id} to "${stageLabel(targetStage)}" from "${stageLabel(lead.stage)}".`,
       });
     }
 
     await client.query('BEGIN');
     await client.query(
-      `UPDATE leads SET stage = $1, updated_at = now() WHERE id = $2`,
+      `UPDATE leads SET stage = $1, stage_entered_at = now() WHERE id = $2`,
       [targetStage, leadId]
     );
     await logAudit(client, {
-      leadId,
-      userId: req.user.id,
-      action: 'stage_change',
-      detail: `${lead.stage} -> ${targetStage}`,
+      userId: req.user.id, action: 'Stage Change', entity: 'Lead/Opportunity', entityId: lead.id,
+      details: `${stageLabel(lead.stage)} → ${stageLabel(targetStage)}`,
     });
+    await addNotification(client, { message: `${lead.id} moved to "${stageLabel(targetStage)}".`, type: 'info' });
     await client.query('COMMIT');
 
     const updated = await pool.query('SELECT * FROM leads WHERE id = $1', [leadId]);
@@ -119,46 +130,12 @@ router.post('/:id/advance', async (req, res) => {
   }
 });
 
-// POST /api/leads/:id/manager-approve — manager-only. Approves a high-value
-// deal sitting in Proposal and moves it straight to Won. requireRole is
-// enforced here on the server; the button only being *visible* to managers
-// on the frontend is cosmetic, not the actual security boundary.
-router.post('/:id/manager-approve', requireRole('sales_manager'), async (req, res) => {
-  const leadId = Number(req.params.id);
-  const client = await pool.connect();
-  try {
-    const { rows } = await client.query('SELECT * FROM leads WHERE id = $1', [leadId]);
-    const lead = rows[0];
-    if (!lead) {
-      return res.status(404).json({ error: 'Lead not found.' });
-    }
-    if (lead.stage !== 'Proposal') {
-      return res.status(409).json({ error: `Lead must be in Proposal stage to approve. Currently: ${lead.stage}.` });
-    }
-
-    await client.query('BEGIN');
-    await client.query(
-      `UPDATE leads
-       SET stage = 'Won', approval_status = 'approved', approved_by = $1, approved_at = now(), updated_at = now()
-       WHERE id = $2`,
-      [req.user.id, leadId]
-    );
-    await logAudit(client, {
-      leadId,
-      userId: req.user.id,
-      action: 'manager_approve',
-      detail: `Approved and moved to Won (value ${lead.est_value})`,
-    });
-    await client.query('COMMIT');
-
-    const updated = await pool.query('SELECT * FROM leads WHERE id = $1', [leadId]);
-    res.json({ lead: updated.rows[0] });
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    res.status(500).json({ error: 'Failed to approve lead.' });
-  } finally {
-    client.release();
-  }
+// GET /api/leads/:id/next-stage-options — UI convenience only (matches
+// getNextStageOptions), NOT a security boundary — /advance re-checks everything.
+router.get('/:id/next-stage-options', async (req, res) => {
+  const { rows } = await pool.query('SELECT stage FROM leads WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Lead not found.' });
+  res.json({ options: getNextStageOptions(rows[0].stage) });
 });
 
 module.exports = router;

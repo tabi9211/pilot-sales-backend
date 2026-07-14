@@ -15,9 +15,6 @@ router.post('/login', loginLimiter, async (req, res) => {
 
   const { rows } = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
   const user = rows[0];
-
-  // Same generic error whether the user doesn't exist or the password is wrong —
-  // avoids leaking which usernames are valid.
   if (!user) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
@@ -25,14 +22,20 @@ router.post('/login', loginLimiter, async (req, res) => {
   if (!match) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
+  if (user.status !== 'Active') {
+    return res.status(403).json({ error: 'This account is inactive.' });
+  }
 
   const token = jwt.sign(
-    { sub: user.id, username: user.username, role: user.role },
+    { sub: user.id, username: user.username, name: user.name, role: user.role },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
   );
 
-  res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+  res.json({
+    token,
+    user: { id: user.id, username: user.username, name: user.name, role: user.role },
+  });
 });
 
 router.get('/me', requireAuth, (req, res) => {

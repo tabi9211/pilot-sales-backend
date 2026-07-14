@@ -1,15 +1,13 @@
 const rateLimit = require('express-rate-limit');
 
-// General API traffic
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 60,
+  max: 120,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please slow down and try again shortly.' },
 });
 
-// Tighter limit on login to slow down credential-guessing
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,

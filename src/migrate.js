@@ -6,7 +6,7 @@ const { pool } = require('./db');
 async function migrate() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(sql);
-  console.log('Migration complete: users, leads, audit_log tables ready.');
+  console.log('Migration complete: all CBMP Wave 0+1 tables ready.');
   await pool.end();
 }
 
