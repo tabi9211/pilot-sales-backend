@@ -105,6 +105,65 @@ CREATE TABLE IF NOT EXISTS negotiations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ============================================================================
+-- Wave 2 — Delivery cluster
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS contracts (
+  id TEXT PRIMARY KEY, -- 'CNT-101' style
+  lead_id TEXT NOT NULL REFERENCES leads(id),
+  proposal_id TEXT REFERENCES proposals(id),
+  contract_number TEXT UNIQUE NOT NULL, -- 'SOF/2026/0101'
+  customer_id INTEGER NOT NULL REFERENCES customers(id),
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'Pending Approval' CHECK (status IN ('Pending Approval', 'Approved', 'Rejected', 'Active')),
+  total_mrc NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_nrc NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY, -- 'APR-1' style
+  contract_id TEXT NOT NULL REFERENCES contracts(id),
+  level INTEGER NOT NULL,
+  approver_role TEXT NOT NULL,
+  approver_name TEXT,
+  status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Rejected')),
+  decided_at DATE,
+  comments TEXT
+);
+
+CREATE TABLE IF NOT EXISTS work_orders (
+  id TEXT PRIMARY KEY, -- 'WO-1' style
+  contract_id TEXT NOT NULL REFERENCES contracts(id),
+  assigned_engineer TEXT,
+  status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open', 'Installed')),
+  created_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  target_install_date DATE
+);
+
+CREATE TABLE IF NOT EXISTS work_order_services (
+  id SERIAL PRIMARY KEY,
+  work_order_id TEXT NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+  sku_id TEXT NOT NULL REFERENCES service_catalogue(id),
+  qty NUMERIC(10,2) NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS uat_records (
+  id TEXT PRIMARY KEY, -- 'UAT-1' style
+  work_order_id TEXT NOT NULL REFERENCES work_orders(id),
+  test_date DATE,
+  result TEXT NOT NULL DEFAULT 'Pending' CHECK (result IN ('Pending', 'Accepted', 'Rejected')),
+  comments TEXT
+);
+
+CREATE TABLE IF NOT EXISTS capacity_pool (
+  resource TEXT PRIMARY KEY,
+  total NUMERIC(14,2) NOT NULL,
+  used NUMERIC(14,2) NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id SERIAL PRIMARY KEY,
   user_id INTEGER REFERENCES users(id),

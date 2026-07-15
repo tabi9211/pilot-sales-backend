@@ -8,6 +8,10 @@ const customersRoutes = require('./routes/customers');
 const catalogueRoutes = require('./routes/catalogue');
 const proposalsRoutes = require('./routes/proposals');
 const negotiationsRoutes = require('./routes/negotiations');
+const contractsRoutes = require('./routes/contracts');
+const approvalsRoutes = require('./routes/approvals');
+const provisioningRoutes = require('./routes/provisioning');
+const uatRoutes = require('./routes/uat');
 
 const app = express();
 
@@ -23,6 +27,10 @@ app.use('/api/customers', customersRoutes);
 app.use('/api/catalogue', catalogueRoutes);
 app.use('/api/proposals', proposalsRoutes);
 app.use('/api/negotiations', negotiationsRoutes);
+app.use('/api/contracts', contractsRoutes);
+app.use('/api/approvals', approvalsRoutes);
+app.use('/api/work-orders', provisioningRoutes);
+app.use('/api/uat', uatRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);

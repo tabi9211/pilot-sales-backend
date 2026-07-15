@@ -121,10 +121,34 @@ async function seedCatalogue() {
   console.log(`Seeded ${SERVICE_CATALOGUE.length} catalogue items and ${GL_MAPPINGS.length} GL mappings.`);
 }
 
+const CAPACITY_POOL = [
+  { resource: 'CPU (vCores)', total: 4000, used: 2650 },
+  { resource: 'RAM (GB)', total: 16000, used: 10200 },
+  { resource: 'Storage (TB)', total: 900, used: 610 },
+  { resource: 'Firewall Instances', total: 40, used: 27 },
+  { resource: 'Backup Capacity (TB)', total: 500, used: 340 },
+];
+
+async function seedCapacityPool() {
+  const { rows: existing } = await pool.query('SELECT resource FROM capacity_pool');
+  if (existing.length) {
+    console.log('Capacity pool already seeded — skipping.');
+    return;
+  }
+  for (const c of CAPACITY_POOL) {
+    await pool.query(
+      'INSERT INTO capacity_pool (resource, total, used) VALUES ($1,$2,$3)',
+      [c.resource, c.total, c.used]
+    );
+  }
+  console.log(`Seeded ${CAPACITY_POOL.length} capacity pool resources.`);
+}
+
 async function seed() {
   await seedUsers();
   await seedCustomersAndContacts();
   await seedCatalogue();
+  await seedCapacityPool();
   await pool.end();
 }
 

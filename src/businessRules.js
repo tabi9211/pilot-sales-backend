@@ -83,21 +83,43 @@ function canAdvance(currentStage, nextStage) {
   return allowedNext.includes(nextStage);
 }
 
-// Matches core.js getNextStageOptions exactly — the Sales-cluster subset.
-// (Delivery/Finance options get added here in later waves.) canAdvance()
-// above now uses this map as the actual enforcement source, not just UI hints.
+// Matches core.js getNextStageOptions exactly — now covering Sales + Delivery.
+// canAdvance() above uses this map as the actual enforcement source, not just
+// UI hints. Delivery-cluster entries here are mostly reached via automatic
+// side effects (contract approval, work order install, UAT decisions) rather
+// than a manual "Advance" click — but the rule still has to allow them.
 const NEXT_STAGE_OPTIONS = {
-  lead_created:     [{ id: 'qualified', label: 'Mark Qualified' }],
-  qualified:        [{ id: 'solutioning', label: 'Start Solutioning' }],
-  solutioning:      [{ id: 'proposal_created', label: 'Proposal Created' }],
-  proposal_created: [{ id: 'negotiation', label: 'Send to Negotiation' }],
-  negotiation:      [
+  lead_created:       [{ id: 'qualified', label: 'Mark Qualified' }],
+  qualified:          [{ id: 'solutioning', label: 'Start Solutioning' }],
+  solutioning:        [{ id: 'proposal_created', label: 'Proposal Created' }],
+  proposal_created:   [{ id: 'negotiation', label: 'Send to Negotiation' }],
+  negotiation:        [
     { id: 'customer_accepted', label: 'Customer Accepted' },
     { id: 'customer_rejected', label: 'Customer Rejected' },
+  ],
+  customer_accepted:  [{ id: 'contract_generated', label: 'Generate Contract/SOF' }],
+  contract_generated: [{ id: 'internal_approval', label: 'Complete Internal Approval' }],
+  internal_approval:  [{ id: 'work_order_created', label: 'Create Work Order' }],
+  work_order_created: [{ id: 'installed', label: 'Mark Installed' }],
+  installed:          [{ id: 'customer_uat', label: 'Schedule UAT' }],
+  customer_uat:       [
+    { id: 'uat_accepted', label: 'UAT Accepted' },
+    { id: 'installed', label: 'UAT Rejected — back to Installed' }, // matches decideUAT()'s loop-back
   ],
 };
 function getNextStageOptions(stage) {
   return NEXT_STAGE_OPTIONS[stage] || [];
+}
+
+// Approval-chain role gate — the fix agreed for the "who can decide an
+// approval" gap: a user can act on an approval only if their own role
+// matches that approval's assigned approverRole, or if they're System Admin
+// acting on anyone's behalf. This is narrower than (and independent of)
+// general cluster access — it solves both problems discussed: Sales Manager
+// doesn't need full 'delivery' cluster access to act on their own approval,
+// and Cloud Engineer/Legal User can no longer decide a Finance Manager's step.
+function canDecideApproval(userRole, approverRole) {
+  return userRole === 'System Admin' || userRole === approverRole;
 }
 
 module.exports = {
@@ -112,4 +134,5 @@ module.exports = {
   canCreateLead,
   canAdvance,
   getNextStageOptions,
+  canDecideApproval,
 };
